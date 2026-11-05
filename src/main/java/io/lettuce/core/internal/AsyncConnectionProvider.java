@@ -80,7 +80,7 @@ public class AsyncConnectionProvider<K, T extends AsyncCloseable, F extends Comp
 
         AtomicBoolean atomicBoolean = new AtomicBoolean();
 
-        sync = connections.computeIfAbsent(key, connectionKey -> {
+        Sync<K, T, F> acquired = connections.computeIfAbsent(key, connectionKey -> {
 
             Sync<K, T, F> createdSync = new Sync<>(key, connectionFactory.apply(key));
 
@@ -93,15 +93,16 @@ public class AsyncConnectionProvider<K, T extends AsyncCloseable, F extends Comp
 
         if (atomicBoolean.compareAndSet(false, true)) {
 
-            sync.getConnection().whenComplete((c, t) -> {
+            acquired.getConnection().whenComplete((c, t) -> {
 
                 if (t != null) {
-                    connections.remove(key);
+                    // A newer synchronizer may already own this key. Remove only the attempt that failed.
+                    connections.remove(key, acquired);
                 }
             });
         }
 
-        return sync;
+        return acquired;
     }
 
     /**
@@ -153,6 +154,9 @@ public class AsyncConnectionProvider<K, T extends AsyncCloseable, F extends Comp
 
     /**
      * Close a connection by its connection {@code key}. Pending connections are closed using future chaining.
+     * <p>
+     * Closes the connection cached for {@code key} at lookup time. A replacement installed for the same key before that entry
+     * is removed stays cached and is not closed.
      *
      * @param key the connection {@code key}, must not be {@code null}.
      */
@@ -162,7 +166,8 @@ public class AsyncConnectionProvider<K, T extends AsyncCloseable, F extends Comp
 
         Sync<K, T, F> sync = connections.get(key);
         if (sync != null) {
-            connections.remove(key);
+            // Remove only the synchronizer that was selected for close. Keep a concurrent replacement.
+            connections.remove(key, sync);
             sync.doWithConnection(AsyncCloseable::closeAsync);
         }
     }
